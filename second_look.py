@@ -15,6 +15,7 @@ import argparse
 # Class IDs in the SSD model; 15 == "person"
 PERSON_CLASS_ID = 15
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Headless person detection with MobileNet-SSD"
