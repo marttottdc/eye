@@ -1,32 +1,32 @@
 import cv2
 
-# 1. Open the camera
 cap = cv2.VideoCapture(0)
 
-# 2. Initialize the HOG person detector
+# Load the Daimler frontal-only detector
 hog = cv2.HOGDescriptor()
-hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+hog.setSVMDetector(cv2.HOGDescriptor_getDaimlerPeopleDetector())
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # 3. Detect people
-    #    winStride can be tuned for speed vs accuracy
-    boxes, weights = hog.detectMultiScale(frame,
-                                          winStride=(8,8),
-                                          padding=(16,16),
-                                          scale=1.05)
-    if len(boxes) > 0:
-        print("👤 Person detected!")
-    else:
-        print("– no person")
+    rects, weights = hog.detectMultiScale(
+        frame,
+        winStride=(4, 4),     # smaller stride → finer search
+        padding=(8, 8),       # less padding if you know people never touch frame edges
+        scale=1.02            # tiny scale steps because size won’t vary much
+    )
 
-    # 4. (Optional) draw boxes and show
-    for (x, y, w, h) in boxes:
-        cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
-    cv2.imshow("Person Detector", frame)
+    if rects.any():
+        print("👤 Person detected head-on!")
+    else:
+        print("– no one in view")
+
+    # draw
+    for (x, y, w, h) in rects:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+    cv2.imshow("Head-On HOG", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
