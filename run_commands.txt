@@ -1,0 +1,10 @@
+python3 person_detect_dnn.py \
+  --prototxt deploy.prototxt \
+  --model MobileNetSSD_deploy.caffemodel \
+  --confidence 0.5 \
+  --headless
+
+
+python3 person_detect_dnn.py \
+  --prototxt deploy.prototxt \
+  --model MobileNetSSD_deploy.caffemodel
