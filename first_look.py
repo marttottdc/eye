@@ -1,4 +1,5 @@
 import cv2
+import datetime
 
 # open camera
 cap = cv2.VideoCapture(0)
@@ -20,7 +21,10 @@ try:
                                          scale=1.05)
 
         # print a simple flag: 1 = someone in view, 0 = none
-        print("Persona" if len(boxes) else 0)
+
+        if len(boxes) > 0:
+            now = datetime.datetime.now().isoformat(timespec='seconds')
+            print(f'Persona detected {now}')
 
         # if you need a small delay to throttle CPU:
         # time.sleep(0.05)
