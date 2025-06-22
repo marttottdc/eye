@@ -1,3 +1,6 @@
 wget https://raw.githubusercontent.com/chuanqi305/MobileNet-SSD/deploy.prototxt
 wget -O MobileNetSSD_deploy.caffemodel \
   https://github.com/chuanqi305/MobileNet-SSD/raw/master/MobileNetSSD_deploy.caffemodel
+
+
+  https://github.com/lindevs/yolov8-face?tab=readme-ov-file
