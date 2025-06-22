@@ -16,6 +16,11 @@ def encode_crop(img) -> str | None:
     return base64.b64encode(buf).decode("ascii") if ok else None
 
 
+import face_recognition
+
+image = face_recognition.load_image_file("person.jpg")
+encoding = face_recognition.face_encodings(image)[0]  # 128-d vector
+
 def search_person(b64_face: str, meta: dict) -> None:
     """Send the face + metadata to the webhook via POST/Bearer."""
     headers = {
