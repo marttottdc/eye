@@ -1,1 +1,3 @@
 https://github.com/lindevs/yolov8-face?tab=readme-ov-file
+
+https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8x-face-lindevs.pt
