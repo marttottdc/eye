@@ -5,7 +5,7 @@ from ultralytics import YOLO
 WEIGHTS       = os.getenv("YOLO_WEIGHTS",  "yolov8x-face-lindevs.pt")
 WEBHOOK_URL   = os.getenv("WEBHOOK_URL",   "https://developer.moio.ai/webhooks/f8284f2f-db74-4b45-a1e1-30479ac3117c/")
 BEARER_TOKEN  = os.getenv("WEBHOOK_TOKEN", "e64465fbe22356fd66b429749a85c4783eb1262f5c763145ba4cb24585eb84f6")
-VISUALIZE     = bool(int(os.getenv("VISUALIZE", "1")))
+VISUALIZE     = bool(int(os.getenv("VISUALIZE", "0")))
 MIN_CONF      = float(os.getenv("MIN_CONF",  "0.40"))
 SEND_COOLDOWN = float(os.getenv("SEND_COOLDOWN", "20.0"))
 # ───────────────────────────────────────────────────────────────────
