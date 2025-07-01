@@ -1,0 +1,94 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="HtmlUnknownAttribute" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="myValues">
+        <value>
+          <list size="30">
+            <item index="0" class="java.lang.String" itemvalue="job-posting" />
+            <item index="1" class="java.lang.String" itemvalue="hx-swap" />
+            <item index="2" class="java.lang.String" itemvalue="hx-post" />
+            <item index="3" class="java.lang.String" itemvalue="hx-trigger" />
+            <item index="4" class="java.lang.String" itemvalue="hx-vals" />
+            <item index="5" class="java.lang.String" itemvalue="hx-headers" />
+            <item index="6" class="java.lang.String" itemvalue="hx-target" />
+            <item index="7" class="java.lang.String" itemvalue="hx-confirm" />
+            <item index="8" class="java.lang.String" itemvalue="x-data" />
+            <item index="9" class="java.lang.String" itemvalue="x-tooltip" />
+            <item index="10" class="java.lang.String" itemvalue="hx-get" />
+            <item index="11" class="java.lang.String" itemvalue="hx-prompt" />
+            <item index="12" class="java.lang.String" itemvalue="x-model" />
+            <item index="13" class="java.lang.String" itemvalue="x-text" />
+            <item index="14" class="java.lang.String" itemvalue="hx-disabled-elt" />
+            <item index="15" class="java.lang.String" itemvalue="hx-on" />
+            <item index="16" class="java.lang.String" itemvalue="x-init" />
+            <item index="17" class="java.lang.String" itemvalue="x-for" />
+            <item index="18" class="java.lang.String" itemvalue="hx-indicator" />
+            <item index="19" class="java.lang.String" itemvalue="hx-push-url" />
+            <item index="20" class="java.lang.String" itemvalue="ws-connect" />
+            <item index="21" class="java.lang.String" itemvalue="ws-send" />
+            <item index="22" class="java.lang.String" itemvalue="enctype" />
+            <item index="23" class="java.lang.String" itemvalue="hx-swap-oob" />
+            <item index="24" class="java.lang.String" itemvalue="hx-ext" />
+            <item index="25" class="java.lang.String" itemvalue="hx-sse" />
+            <item index="26" class="java.lang.String" itemvalue="sse-connect" />
+            <item index="27" class="java.lang.String" itemvalue="sse-swap" />
+            <item index="28" class="java.lang.String" itemvalue="hx-include" />
+            <item index="29" class="java.lang.String" itemvalue="hx-boost" />
+          </list>
+        </value>
+      </option>
+      <option name="myCustomValuesEnabled" value="true" />
+    </inspection_tool>
+    <inspection_tool class="HtmlUnknownTag" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="myValues">
+        <value>
+          <list size="8">
+            <item index="0" class="java.lang.String" itemvalue="nobr" />
+            <item index="1" class="java.lang.String" itemvalue="noembed" />
+            <item index="2" class="java.lang.String" itemvalue="comment" />
+            <item index="3" class="java.lang.String" itemvalue="noscript" />
+            <item index="4" class="java.lang.String" itemvalue="embed" />
+            <item index="5" class="java.lang.String" itemvalue="script" />
+            <item index="6" class="java.lang.String" itemvalue="hr" />
+            <item index="7" class="java.lang.String" itemvalue="c-loader" />
+          </list>
+        </value>
+      </option>
+      <option name="myCustomValuesEnabled" value="true" />
+    </inspection_tool>
+    <inspection_tool class="PyCompatibilityInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ourVersions">
+        <value>
+          <list size="4">
+            <item index="0" class="java.lang.String" itemvalue="3.12" />
+            <item index="1" class="java.lang.String" itemvalue="3.10" />
+            <item index="2" class="java.lang.String" itemvalue="3.11" />
+            <item index="3" class="java.lang.String" itemvalue="3.13" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <value>
+          <list size="6">
+            <item index="0" class="java.lang.String" itemvalue="pydantic_core" />
+            <item index="1" class="java.lang.String" itemvalue="typing_extensions" />
+            <item index="2" class="java.lang.String" itemvalue="django_csp" />
+            <item index="3" class="java.lang.String" itemvalue="pyasn1_modules" />
+            <item index="4" class="java.lang.String" itemvalue="prometheus_client" />
+            <item index="5" class="java.lang.String" itemvalue="agents" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPep8Inspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="E501" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
