@@ -23,7 +23,7 @@ def send(face_id: int, img):
             "Authorization": f"Bearer {BEARER_TOKEN}",
             "Content-Type": "application/json",
         }
-        requests.post(WEBHOOK_URL, headers=headers, json={"id": face_id, "img_b64": b64}, timeout=2)
+        requests.post(WEBHOOK_URL, headers=headers, json={"id": face_id, "img_b64": b64}, timeout=30)
         print(f"[{face_id}] sent")
     except Exception as e:
         print(f"[{face_id}] send failed – {e}")
