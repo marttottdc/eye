@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-import cv2, time, base64, requests
+import cv2, time, base64, requests, os
 from picamera2 import Picamera2
 
 # ---------- CONFIG -----------------------------------------------------------
-CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+CASCADE_PATH = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
 SEND_EVERY   = 10          # seconds between uploads per ID
 MAX_MISS     = 15          # frames to wait before dropping an ID
-WEBHOOK_URL  = "https://example.com/webhook"   # ← change or replace send() below
+
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL",   "https://developer.moio.ai/webhooks/f8284f2f-db74-4b45-a1e1-30479ac3117c/")
+BEARER_TOKEN  = os.getenv("WEBHOOK_TOKEN", "e64465fbe22356fd66b429749a85c4783eb1262f5c763145ba4cb24585eb84f6")
 # -----------------------------------------------------------------------------
 
 # helper ──────────────────────────────────────────────────────────────────────
@@ -17,7 +19,11 @@ def send(face_id: int, img):
         return
     b64 = base64.b64encode(buf).decode()
     try:
-        requests.post(WEBHOOK_URL, json={"id": face_id, "img_b64": b64}, timeout=2)
+        headers = {
+            "Authorization": f"Bearer {BEARER_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        requests.post(WEBHOOK_URL, headers=headers, json={"id": face_id, "img_b64": b64}, timeout=2)
         print(f"[{face_id}] sent")
     except Exception as e:
         print(f"[{face_id}] send failed – {e}")
