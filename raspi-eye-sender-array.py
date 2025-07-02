@@ -1,42 +1,55 @@
 #!/usr/bin/env python3
 """
-Face-tracker / uploader for Raspberry Pi 3B+.
-Changes:
-• pure-async producer/consumer model – no threads
-• back-pressure: camera stops if the upload queue is full
-• graceful shutdown on SIGINT / SIGTERM
-• retries with exponential back-off
-• better tracking (IoU threshold instead of 30-px radius)
-• ≤20 % CPU on Pi 3B+ @640×480, ~5 uploads/s
+Async face-tracker/uploader for Raspberry Pi 3 B+.
+– Haar-cascade detection every N frames on a down-scaled copy
+– Track faces with IoU, assign stable IDs
+– Upload five JPEGs per ID (n-2…n+2) to a webhook with retries
+– Console logging + heartbeat
 """
-import asyncio, base64, os, signal, time
+
+import asyncio, base64, contextlib, logging, os, signal, time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Deque, Dict, Tuple, List
 
 import aiohttp, cv2
 from picamera2 import Picamera2
 
-# ─────────── configuration ────────────────────────────────────────────────────
-CASCADE_PATH  = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
-DETECT_EVERY  = 5          # analyse 1 of N frames
-SEND_EVERY    = 20         # seconds – per face ID
-MAX_MISS      = 15         # frames before dropping a track
-MAX_QUEUE     = 8          # block camera if more tasks than this
-JPEG_Q        = 72         # quality
-WEBHOOK_URL   = os.getenv("WEBHOOK_URL",   "<your-url>")
-BEARER_TOKEN  = os.getenv("WEBHOOK_TOKEN", "<your-token>")
+# ───────────────────────────── config ─────────────────────────────────────────
+CASCADE_PATH   = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
+DETECT_EVERY   = 5           # analyse 1 out of N frames
+SEND_EVERY     = 20          # seconds between uploads per face ID
+MAX_MISS       = 15          # frames before a track is dropped
+MAX_QUEUE      = 8           # back-pressure – block producer if > N batches pending
+JPEG_Q         = 72          # jpeg quality
+HEARTBEAT_SEC  = 30          # heartbeat interval
 
-# ─────────── helpers ──────────────────────────────────────────────────────────
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL",   "<your-url>")
+BEARER_TOKEN   = os.getenv("WEBHOOK_TOKEN", "<your-token>")
+
+# ──────────────────────────── logging ─────────────────────────────────────────
+def setup_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    return logging.getLogger("tracker")
+
+log = setup_logging()
+
+# ────────────────────────── dataclasses ───────────────────────────────────────
 @dataclass
 class Track:
-    bbox: tuple[int, int, int, int]
+    bbox: Tuple[int, int, int, int]
     last_seen: float
     last_sent: float = 0.0
     miss: int = 0
     id: int = field(default_factory=int)
 
-def iou(a, b) -> float:
-    """Intersection-over-union of two (x,y,w,h) boxes."""
+# ───────────────────────── helper functions ───────────────────────────────────
+def iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    """Intersection-over-Union of two (x,y,w,h) rectangles."""
     ax1, ay1, aw, ah = a
     bx1, by1, bw, bh = b
     ax2, ay2, bx2, by2 = ax1 + aw, ay1 + ah, bx1 + bw, by1 + bh
@@ -46,129 +59,146 @@ def iou(a, b) -> float:
     union   = aw * ah + bw * bh - inter
     return inter / union if union else 0.0
 
-# ─────────── async uploader coroutine ─────────────────────────────────────────
-async def uploader(queue: asyncio.Queue, session: aiohttp.ClientSession):
-    headers = {"Authorization": f"Bearer {BEARER_TOKEN}",
-               "Content-Type": "application/json"}
-    while True:
-        fid, imgs = await queue.get()
-        tries, delay = 0, 2
-        # encode once here (saves RAM)
-        b64_array = [base64.b64encode(cv2.imencode(".jpg", im,
-                        [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_Q])[1]).decode()
-                     for im in imgs]
-        while True:
-            try:
-                async with session.post(WEBHOOK_URL,
-                                         headers=headers,
-                                         json={"id": fid,
-                                               "img_b64_array": b64_array},
-                                         timeout=10) as resp:
-                    if resp.status == 200:
-                        print(f"[{fid}] → sent {len(imgs)} imgs")
-                        break
-                    raise RuntimeError(f"HTTP {resp.status}")
-            except Exception as e:
-                tries += 1
-                if tries > 5:
-                    print(f"[{fid}] drop after 5 retries: {e}")
-                    break
-                await asyncio.sleep(delay)
-                delay *= 2
-        queue.task_done()
-
-# ─────────── main async pipeline ──────────────────────────────────────────────
-async def main():
-    # set up camera
+def create_camera() -> Picamera2:
     cam = Picamera2()
     cam.configure(cam.create_preview_configuration(
         main={"format": "XRGB8888", "size": (640, 480)}))
     cam.start()
-    await asyncio.sleep(0.3)
+    return cam
 
+def encode_images(imgs) -> List[str]:
+    return [
+        base64.b64encode(
+            cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_Q])[1]
+        ).decode()
+        for im in imgs
+    ]
+
+# ─────────────────────── async coroutines ─────────────────────────────────────
+async def uploader(q: asyncio.Queue):
+    """Background consumer pushing batches to WEBHOOK_URL."""
+    headers = {"Authorization": f"Bearer {BEARER_TOKEN}",
+               "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        while True:
+            fid, imgs = await q.get()
+            b64_array = encode_images(imgs)
+
+            tries, delay = 0, 2
+            while True:
+                try:
+                    async with session.post(
+                        WEBHOOK_URL,
+                        headers=headers,
+                        json={"id": fid, "img_b64_array": b64_array},
+                        timeout=10,
+                    ) as resp:
+                        if resp.status == 200:
+                            log.info(f"[{fid}] sent {len(imgs)} imgs")
+                            break
+                        raise RuntimeError(f"HTTP {resp.status}")
+                except Exception as e:
+                    tries += 1
+                    if tries > 5:
+                        log.error(f"[{fid}] drop after 5 retries: {e}")
+                        break
+                    await asyncio.sleep(delay)
+                    delay *= 2
+            q.task_done()
+
+async def heartbeat(q: asyncio.Queue, tracks: Dict[int, Track]):
+    """Periodic status message."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_SEC)
+        log.debug(f"♥ heartbeat – queue={q.qsize()} tracks={len(tracks)}")
+
+# ──────────────────────────── main loop ───────────────────────────────────────
+async def track_and_send():
     cascade = cv2.CascadeClassifier(CASCADE_PATH)
     if cascade.empty():
         raise FileNotFoundError(CASCADE_PATH)
 
-    queue   = asyncio.Queue(MAX_QUEUE)
-    async with aiohttp.ClientSession() as session:
-        up_task = asyncio.create_task(uploader(queue, session))
+    cam             = create_camera()
+    frame_no        = 0
+    last4: Deque    = deque(maxlen=4)
+    tracks: Dict[int, Track] = {}
+    next_id         = 0
 
-        tracks: dict[int, Track] = {}
-        next_id, frame_no = 0, 0
-        last4: deque = deque(maxlen=4)   # circular buffer
+    queue = asyncio.Queue(MAX_QUEUE)
+    up_task  = asyncio.create_task(uploader(queue))
+    hb_task  = asyncio.create_task(heartbeat(queue, tracks))
 
-        try:
-            while True:
-                high_res = cam.capture_array()
-                frame_no += 1
-                last4.append(high_res)
+    try:
+        while True:
+            high_res = cam.capture_array()
+            frame_no += 1
+            last4.append(high_res)
 
-                # throttled detection
-                if frame_no % DETECT_EVERY != 0:
+            # skip unless this is a detection frame
+            if frame_no % DETECT_EVERY:
+                continue
+
+            # run cascade on down-scaled frame
+            small  = cv2.resize(high_res, (320, 240))
+            gray   = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            faces  = cascade.detectMultiScale(gray, 1.2, 3, 0, (30, 30))
+            sx, sy = high_res.shape[1] / 320, high_res.shape[0] / 240
+            faces  = [(int(x * sx), int(y * sy), int(w * sx), int(h * sy))
+                      for x, y, w, h in faces]
+
+            # age existing tracks
+            for t in tracks.values():
+                t.miss += 1
+
+            # assign detections → tracks
+            for box in faces:
+                best_iou, best_id = 0.0, None
+                for tid, tr in tracks.items():
+                    val = iou(box, tr.bbox)
+                    if val > best_iou:
+                        best_iou, best_id = val, tid
+                if best_iou > 0.3:
+                    tr = tracks[best_id]
+                    tr.bbox, tr.miss, tr.last_seen = box, 0, time.time()
+                    log.info(f"DETECT ▶︎ existing ID {best_id}")
+                else:
+                    tracks[next_id] = Track(box, time.time(), id=next_id)
+                    log.info(f"DETECT ◎ new ID {next_id}")
+                    next_id += 1
+
+            # drop stale tracks
+            for tid in [tid for tid, tr in tracks.items() if tr.miss > MAX_MISS]:
+                tracks.pop(tid, None)
+
+            # enqueue uploads
+            now = time.time()
+            for tr in tracks.values():
+                if now - tr.last_sent < SEND_EVERY:
                     continue
-
-                # detect on down-scaled gray
-                small = cv2.resize(high_res, (320, 240))
-                gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                faces = cascade.detectMultiScale(gray, 1.2, 3, 0, (30,30))
-                if not len(faces):
-                    # ageing
-                    for t in list(tracks.values()):
-                        t.miss += 1
-                        if t.miss > MAX_MISS:
-                            tracks.pop(t.id, None)
+                if queue.full():
                     continue
+                imgs = list(last4) + [cam.capture_array(), cam.capture_array()]
+                await queue.put((tr.id, imgs))
+                log.info(f"SEND  ↥ queued ID {tr.id} ({len(imgs)} imgs)")
+                tr.last_sent = now
+    finally:
+        log.info("Shutting down…")
+        cam.stop()
+        await queue.join()
+        up_task.cancel(), hb_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await up_task
+            await hb_task
 
-                # scale back to original size
-                sx, sy = high_res.shape[1]/320, high_res.shape[0]/240
-                faces  = [(int(x*sx), int(y*sy), int(w*sx), int(h*sy))
-                          for x,y,w,h in faces]
-
-                # assign detections
-                for box in faces:
-                    best, bid = 0, None
-                    for t in tracks.values():
-                        val = iou(box, t.bbox)
-                        if val > best:
-                            best, bid = val, t.id
-                    if best > .3:                      # match
-                        t = tracks[bid]
-                        t.bbox, t.last_seen, t.miss = box, time.time(), 0
-                    else:                              # new track
-                        tracks[next_id] = Track(box, time.time(), id=next_id)
-                        next_id += 1
-
-                # house-keeping
-                for tid in [k for k, t in tracks.items() if t.miss > MAX_MISS]:
-                    tracks.pop(tid, None)
-
-                # upload decision
-                now = time.time()
-                for t in tracks.values():
-                    if now - t.last_sent < SEND_EVERY:
-                        continue
-                    if queue.full():                   # back-pressure
-                        continue
-                    imgs = list(last4) + [cam.capture_array(),
-                                          cam.capture_array()]
-                    await queue.put((t.id, imgs))
-                    t.last_sent = now
-
-        finally:       # Ctrl-C or error
-            print("Shutting down…")
-            cam.stop()
-            await queue.join()
-            up_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await up_task
-
-# ─────────── entry-point + POSIX signals ─────────────────────────────────────
-if __name__ == "__main__":
+# ────────────────────────── entry-point ───────────────────────────────────────
+def run():
     loop = asyncio.new_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, loop.stop)
     try:
-        loop.run_until_complete(main())
+        loop.run_until_complete(track_and_send())
     finally:
         loop.close()
+
+if __name__ == "__main__":
+    run()
