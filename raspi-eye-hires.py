@@ -18,6 +18,8 @@ DETECT_EVERY = int(os.getenv("DETECT_EVERY", 5))
 
 WEBHOOK_URL   = os.getenv("WEBHOOK_URL")
 BEARER_TOKEN  = os.getenv("WEBHOOK_TOKEN")
+
+VISUALIZER = int(os.getenv("VISUALIZER", 0))  # 1 = ON, 0 = OFF
 # -----------------------------------------------------------------------------
 
 def send(face_id: int, img):
@@ -138,7 +140,8 @@ while True:
                 cam.start()
                 time.sleep(0.2)
 
-    if frame_counter % 10 == 0:
+
+    if VISUALIZER and frame_counter % 10 == 0:
         for fid, t in tracker.tracks.items():
             x, y, w, h = t["bbox"]
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -146,7 +149,10 @@ while True:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
         cv2.imshow("Face-Tracker", frame)
 
-    if cv2.waitKey(1) == 27:
-        break
+    if VISUALIZER:
+        if cv2.waitKey(1) == 27:
+            break
+    else:
+        time.sleep(0.01)
 
 cv2.destroyAllWindows()
