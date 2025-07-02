@@ -111,8 +111,17 @@ while True:
 
             if time.time() - t["last_sent"] >= SEND_EVERY:
                 # Switch to still mode and capture high-res image
-                cam.switch_mode_and_capture_file(still_config, "/tmp/highres.jpg")
-                high_res_frame = cv2.imread("/tmp/highres.jpg")
+                cam.stop()
+                cam.configure(still_config)
+                cam.start()
+                time.sleep(0.2)  # let the camera settle
+
+                high_res_frame = cam.capture_array()
+
+                cam.stop()
+                cam.configure(preview_config)
+                cam.start()
+                time.sleep(0.2)
 
                 preview_width = 320
                 highres_width = high_res_frame.shape[1]
