@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import cv2, time, base64, asyncio, aiohttp, os
+import cv2, time, base64, asyncio, aiohttp, os, threading
 from picamera2 import Picamera2
 
 # ---------- CONFIG -----------------------------------------------------------
@@ -36,11 +36,11 @@ async def send(face_id: int, img_array, session: aiohttp.ClientSession):
         payload = {"id": face_id, "img_b64_array": b64_array}
         async with session.post(WEBHOOK_URL, headers=headers, json=payload, timeout=10) as response:
             if response.status == 200:
-                print(f"[{face_id}] sent {len(b64_array)} images")
+                print(f"[{face_id}] Sent {len(b64_array)} images")
             else:
-                print(f"[{face_id}] send failed – HTTP {response.status}")
+                print(f"[{face_id}] Send failed – HTTP {response.status}")
     except Exception as e:
-        print(f"[{face_id}] send failed – {e}")
+        print(f"[{face_id}] Send failed – {e}")
 
 
 class FaceTracker:
@@ -81,6 +81,12 @@ class FaceTracker:
         return self.tracks
 
 
+def run_async_loop(loop):
+    """Run the asyncio event loop in a separate thread."""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
 # init
 cascade = cv2.CascadeClassifier(CASCADE_PATH)
 if cascade.empty():
@@ -95,10 +101,13 @@ time.sleep(0.5)
 tracker = FaceTracker(max_miss=MAX_MISS)
 frame_counter = 0
 frame_buffer = []  # Store up to 4 frames (n-4 to n-1)
+pending_tasks = []  # Track async tasks
 
 # Async setup
-loop = asyncio.get_event_loop()
-session = aiohttp.ClientSession()
+loop = asyncio.new_event_loop()
+session = aiohttp.ClientSession(loop=loop)
+thread = threading.Thread(target=run_async_loop, args=(loop,), daemon=True)
+thread.start()
 
 try:
     while True:
@@ -143,13 +152,19 @@ try:
 
                     # Schedule async send
                     if img_array:
-                        asyncio.create_task(send(fid, img_array, session))
+                        task = loop.create_task(send(fid, img_array, session))
+                        pending_tasks.append(task)
                         t["last_sent"] = time.time()
 
         # Update frame buffer (keep last 4 frames)
         frame_buffer.append(high_res.copy())
         if len(frame_buffer) > 4:
             frame_buffer.pop(0)
+
+        # Clean up completed tasks
+        if frame_counter % 100 == 0:
+            pending_tasks = [t for t in pending_tasks if not t.done()]
+            print(f"Pending tasks: {len(pending_tasks)}")
 
         # Display (optional, commented out for performance)
         """
@@ -168,6 +183,12 @@ try:
 
 finally:
     cam.stop()
-    # Clean up async session
+    # Clean up async tasks and session
+    loop.call_soon_threadsafe(loop.stop)
+    loop.run_until_complete(loop.shutdown_asyncgens())
+    for task in pending_tasks:
+        if not task.done():
+            loop.run_until_complete(task)
     loop.run_until_complete(session.close())
+    loop.close()
     cv2.destroyAllWindows()
