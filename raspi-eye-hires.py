@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-face_tracker_still.py  –  *alternate* test build
+face_tracker_still.py  –  TEST BUILD (autofocus-safe)
 
- • Uses a **dual-stream** approach with Picamera2:
-     – 640×480 preview stream @30 fps for real-time face detection
-     – Full-resolution still (sensor max) captured only when a face
-       has waited SEND_EVERY seconds → crisp, no motion blur
- • Locks exposure to 1/200 s to kill smearing
- • Uploads **one** high-quality JPEG (Q=95) per burst via requests.post
- • Threaded worker + queue for non-blocking network I/O
- • Graceful shutdown on Ctrl-C or SIGTERM
+ • Dual-stream: 640×480 preview for detection + full-res still for upload
+ • Locks exposure to 1/200 s to avoid motion blur
+ • Sends **one** high-quality JPEG (Q=95) per burst to a webhook (requests.post)
+ • Works on *any* Pi Camera: skips autofocus if the sensor doesn’t expose it
+ • Thread worker + queue for non-blocking network I/O
+ • Graceful shutdown on Ctrl-C / SIGTERM
 """
 
 # ───────────────────────── imports ────────────────────────────────────────────
@@ -21,13 +19,13 @@ from typing import Tuple, Dict, Deque
 import cv2, requests
 from picamera2 import Picamera2
 
-# ───────────────────────── config ─────────────────────────────────────────────
+# ───────────────────────── configuration ──────────────────────────────────────
 CASCADE_PATH   = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
 DETECT_EVERY   = 5           # analyse 1 of N preview frames
-SEND_EVERY     = 20          # seconds between uploads per track
-MAX_MISS       = 15          # frames before dropping a track
-MAX_QUEUE      = 8           # block producer if > N bursts pending
-JPEG_Q         = 95          # quality for stills
+SEND_EVERY     = 20          # seconds between uploads per face ID
+MAX_MISS       = 15          # frames before deleting a track
+MAX_QUEUE      = 8           # queue size before producer blocks
+JPEG_Q         = 95          # still-image quality
 HEARTBEAT_SEC  = 30
 
 WEBHOOK_URL    = os.getenv("WEBHOOK_URL",   "<your-url>")
@@ -65,39 +63,43 @@ def encode_b64(img) -> str:
                        [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_Q])[1]
     return base64.b64encode(buf).decode()
 
-# ────────────── camera utilities (dual-stream) ───────────────────────────────
-def init_camera() -> Tuple[Picamera2, dict, dict]:
+# ───────────── camera utilities (dual stream + AF-safe) ───────────────────────
+def init_camera():
     cam = Picamera2()
 
     preview_cfg = cam.create_preview_configuration(
         main={"format": "RGB888", "size": (640, 480)},
         controls={"FrameRate": 30},
     )
-    still_cfg = cam.create_still_configuration()  # max sensor resol.
+    still_cfg = cam.create_still_configuration()  # full sensor res
 
     cam.configure(preview_cfg)
     cam.start()
 
-    # one-shot AF / AE, then lock shutter to 1/200 s
-    time.sleep(0.3)
-    cam.set_controls({"AfMode": 2})          # run autofocus on HQ/v3
+    # ── autofocus only if supported ─────────────────────────────────────────
+    if "AfMode" in cam.camera_controls:
+        log.info("Autofocus supported – running one-shot AF")
+        cam.set_controls({"AfMode": 2})        # one-shot AF
+        time.sleep(0.5)
+    else:
+        log.info("No autofocus control – skipping AF step")
+
+    # ── auto-expose then lock shutter to 1/200 s ────────────────────────────
     cam.set_controls({"AeEnable": 1})
-    time.sleep(0.5)                          # let AE settle
+    time.sleep(0.5)
     cam.set_controls({"AeEnable": 0})
     cam.set_controls({"FrameDurationLimits": (5000, 5000)})  # 5 ms
 
     return cam, preview_cfg, still_cfg
 
-def capture_still(cam: Picamera2, still_cfg: dict,
-                  preview_cfg: dict) -> "np.ndarray":
-    """Switch to still mode, grab image, switch back."""
+def capture_still(cam: Picamera2, still_cfg, preview_cfg):
     cam.switch_mode(still_cfg)
-    time.sleep(0.1)                         # sensor settle
+    time.sleep(0.1)                # sensor settle
     img = cam.capture_array()
     cam.switch_mode(preview_cfg)
     return img
 
-# ─────────────── worker + heartbeat threads ──────────────────────────────────
+# ─────────────── worker & heartbeat threads ──────────────────────────────────
 stop_ev = threading.Event()
 
 def uploader(q: queue.Queue):
@@ -139,7 +141,7 @@ def track_and_send():
 
     cam, prev_cfg, still_cfg = init_camera()
     frame_no = 0
-    history: Deque = deque(maxlen=4)      # not used for still, but keeps flow
+    history: Deque = deque(maxlen=4)       # unused but keeps flow consistent
     tracks: Dict[int, Track] = {}
     next_id = 0
 
@@ -149,29 +151,29 @@ def track_and_send():
 
     try:
         while not stop_ev.is_set():
-            frame = cam.capture_array()          # preview 640×480
+            frame = cam.capture_array()          # 640×480 preview
             frame_no += 1
             history.append(frame)
 
             if frame_no % DETECT_EVERY:
                 continue
 
-            small_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = cascade.detectMultiScale(small_gray, 1.2, 3, 0, (30, 30))
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(gray, 1.2, 3, 0, (30, 30))
 
-            # age out tracks
+            # age tracks
             for tr in tracks.values():
                 tr.miss += 1
 
             # assign detections
             for (x, y, w, h) in faces:
                 box = (x, y, w, h)
-                best_iou, best_id = 0.0, None
+                best_i, best_id = 0.0, None
                 for tid, tr in tracks.items():
                     i = iou(box, tr.bbox)
-                    if i > best_iou:
-                        best_iou, best_id = i, tid
-                if best_iou > 0.3:
+                    if i > best_i:
+                        best_i, best_id = i, tid
+                if best_i > 0.3:
                     tr = tracks[best_id]
                     tr.bbox, tr.miss, tr.last_seen = box, 0, time.time()
                     log.info(f"DETECT ▶ existing ID {best_id}")
@@ -184,13 +186,13 @@ def track_and_send():
             for tid in [tid for tid, tr in tracks.items() if tr.miss > MAX_MISS]:
                 tracks.pop(tid, None)
 
-            # maybe send still
+            # enqueue still if due
             now = time.time()
             for tr in tracks.values():
                 if now - tr.last_sent < SEND_EVERY or q.full():
                     continue
-                hi = capture_still(cam, still_cfg, prev_cfg)
-                q.put((tr.id, encode_b64(hi)))
+                hi_res = capture_still(cam, still_cfg, prev_cfg)
+                q.put((tr.id, encode_b64(hi_res)))
                 log.info(f"SEND ↥ queued ID {tr.id}")
                 tr.last_sent = now
 
@@ -201,12 +203,12 @@ def track_and_send():
         cam.stop()
 
 # ───────────────────────── entry-point ────────────────────────────────────────
-def _signal_handler(sig, frame):
-    log.info(f"Signal {sig} received – exiting…")
+def _sig_handler(sig, frame):
+    log.info(f"Signal {sig} received – shutdown initiated")
     stop_ev.set()
 
-signal.signal(signal.SIGINT,  _signal_handler)
-signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT,  _sig_handler)
+signal.signal(signal.SIGTERM, _sig_handler)
 
 if __name__ == "__main__":
     track_and_send()
