@@ -82,8 +82,10 @@ def encode_images(imgs) -> List[str]:
 def uploader(q: queue.Queue, stop: threading.Event):
     """Blocking worker draining q and POSTing bursts via requests."""
     sess = requests.Session()
-    headers = {"Authorization": f"Bearer {BEARER_TOKEN}",
-               "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {BEARER_TOKEN}",
+        "Content-Type": "application/json"
+    }
     while not stop.is_set() or not q.empty():
         try:
             fid, imgs = q.get(timeout=0.5)
@@ -98,7 +100,7 @@ def uploader(q: queue.Queue, stop: threading.Event):
                     WEBHOOK_URL,
                     headers=headers,
                     json={"id": fid, "img_b64_array": b64_array},
-                    timeout=10,
+                    timeout=30,
                 )
                 if r.ok:
                     log.info(f"[{fid}] sent {len(imgs)} imgs")
