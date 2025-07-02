@@ -24,8 +24,8 @@ MAX_QUEUE      = 8           # back-pressure – block producer if > N batches p
 JPEG_Q         = 72          # jpeg quality
 HEARTBEAT_SEC  = 30          # heartbeat interval
 
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL",   "<your-url>")
-BEARER_TOKEN   = os.getenv("WEBHOOK_TOKEN", "<your-token>")
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL",   "https://developer.moio.ai/webhooks/f8284f2f-db74-4b45-a1e1-30479ac3117c/")
+BEARER_TOKEN   = os.getenv("WEBHOOK_TOKEN", "e64465fbe22356fd66b429749a85c4783eb1262f5c763145ba4cb24585eb84f6")
 
 # ──────────────────────────── logging ─────────────────────────────────────────
 def setup_logging() -> logging.Logger:
