@@ -24,8 +24,8 @@ MAX_QUEUE      = 8            # back-pressure – producer blocks when > N batch
 JPEG_Q         = 72           # JPEG quality (0-100)
 HEARTBEAT_SEC  = 30           # heartbeat interval
 
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL",   "https://developer.moio.ai/webhooks/f8284f2f-db74-4b45-a1e1-30479ac3117c/")
-BEARER_TOKEN   = os.getenv("WEBHOOK_TOKEN", "e64465fbe22356fd66b429749a85c4783eb1262f5c763145ba4cb24585eb84f6")
+WEBHOOK_URL    = "https://developer.moio.ai/webhooks/f8284f2f-db74-4b45-a1e1-30479ac3117c/"
+BEARER_TOKEN   = "e64465fbe22356fd66b429749a85c4783eb1262f5c763145ba4cb24585eb84f6"
 
 # ────────────────────────── logging setup ─────────────────────────────────────
 logging.basicConfig(
@@ -45,6 +45,8 @@ class Track:
     id: int = field(default_factory=int)
 
 # ───────────────────────── helper functions ───────────────────────────────────
+
+
 def iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
     """Intersection-over-Union of two (x,y,w,h) rectangles."""
     ax1, ay1, aw, ah = a
@@ -56,12 +58,14 @@ def iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
     union   = aw * ah + bw * bh - inter
     return inter / union if union else 0.0
 
+
 def create_camera() -> Picamera2:
     cam = Picamera2()
     cam.configure(cam.create_preview_configuration(
         main={"format": "XRGB8888", "size": (640, 480)}))
     cam.start()
     return cam
+
 
 def encode_images(imgs) -> List[str]:
     """JPEG-encode & b64 each image."""
@@ -73,6 +77,8 @@ def encode_images(imgs) -> List[str]:
     ]
 
 # ─────────────────────── worker & heartbeat threads ───────────────────────────
+
+
 def uploader(q: queue.Queue, stop: threading.Event):
     """Blocking worker draining q and POSTing bursts via requests."""
     sess = requests.Session()
@@ -107,12 +113,15 @@ def uploader(q: queue.Queue, stop: threading.Event):
             log.error(f"[{fid}] dropped after 5 retries")
         q.task_done()
 
+
 def heartbeat(q: queue.Queue, tracks: Dict[int, Track], stop: threading.Event):
     while not stop.is_set():
         time.sleep(HEARTBEAT_SEC)
         log.debug(f"♥ heartbeat – queue={q.qsize()} tracks={len(tracks)}")
 
 # ──────────────────────────── main loop ───────────────────────────────────────
+
+
 def track_and_send():
     cascade = cv2.CascadeClassifier(CASCADE_PATH)
     if cascade.empty():
@@ -193,6 +202,8 @@ def track_and_send():
         hb.join()
 
 # ───────────────────────── entry-point ────────────────────────────────────────
+
+
 def run():
     # ensure graceful exit on SIGTERM as well
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
