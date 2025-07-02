@@ -1,214 +1,152 @@
 #!/usr/bin/env python3
-"""
-face_tracker_still.py  –  TEST BUILD (autofocus-safe)
-
- • Dual-stream: 640×480 preview for detection + full-res still for upload
- • Locks exposure to 1/200 s to avoid motion blur
- • Sends **one** high-quality JPEG (Q=95) per burst to a webhook (requests.post)
- • Works on *any* Pi Camera: skips autofocus if the sensor doesn’t expose it
- • Thread worker + queue for non-blocking network I/O
- • Graceful shutdown on Ctrl-C / SIGTERM
-"""
-
-# ───────────────────────── imports ────────────────────────────────────────────
-import base64, logging, os, queue, signal, threading, time
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Tuple, Dict, Deque
-
-import cv2, requests
+import cv2, time, base64, requests, os
+from dotenv import load_dotenv
 from picamera2 import Picamera2
 
-# ───────────────────────── configuration ──────────────────────────────────────
-CASCADE_PATH   = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
-DETECT_EVERY   = 5           # analyse 1 of N preview frames
-SEND_EVERY     = 20          # seconds between uploads per face ID
-MAX_MISS       = 15          # frames before deleting a track
-MAX_QUEUE      = 8           # queue size before producer blocks
-JPEG_Q         = 95          # still-image quality
-HEARTBEAT_SEC  = 30
+# Load .env config
+load_dotenv()
 
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL", "https://developer.moio.ai/webhooks/f8284f2f-db74-4b45-a1e1-30479ac3117c/")
-BEARER_TOKEN   = os.getenv("WEBHOOK_TOKEN", "e64465fbe22356fd66b429749a85c4783eb1262f5c763145ba4cb24585eb84f6")
+# ---------- CONFIG -----------------------------------------------------------
+CASCADE_PATH = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
+STILL_WIDTH  = int(os.getenv("STILL_WIDTH", 1024))
+STILL_HEIGHT = int(os.getenv("STILL_HEIGHT", 768))
+MAX_CROP_SIZE = int(os.getenv("MAX_CROP_SIZE", 400))
 
-# ───────────────────────── logging ────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("tracker")
+SEND_EVERY   = int(os.getenv("SEND_EVERY", 20))
+MAX_MISS     = int(os.getenv("MAX_MISS", 15))
+DETECT_EVERY = int(os.getenv("DETECT_EVERY", 5))
 
-# ───────────────── dataclass & helpers ────────────────────────────────────────
-@dataclass
-class Track:
-    bbox: Tuple[int, int, int, int]
-    last_seen: float
-    last_sent: float = 0.0
-    miss: int = 0
-    id: int = field(default_factory=int)
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL")
+BEARER_TOKEN  = os.getenv("WEBHOOK_TOKEN")
+# -----------------------------------------------------------------------------
 
-def iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
-    ax1, ay1, aw, ah = a
-    bx1, by1, bw, bh = b
-    ax2, ay2, bx2, by2 = ax1 + aw, ay1 + ah, bx1 + bw, by1 + bh
-    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
-    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
-    inter   = inter_w * inter_h
-    union   = aw * ah + bw * bh - inter
-    return inter / union if union else 0.0
-
-def encode_b64(img) -> str:
-    buf = cv2.imencode(".jpg", img,
-                       [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_Q])[1]
-    return base64.b64encode(buf).decode()
-
-# ───────────── camera utilities (dual stream + AF-safe) ───────────────────────
-def init_camera():
-    cam = Picamera2()
-
-    preview_cfg = cam.create_preview_configuration(
-        main={"format": "RGB888", "size": (640, 480)},
-        controls={"FrameRate": 30},
-    )
-    still_cfg = cam.create_still_configuration()  # full sensor res
-
-    cam.configure(preview_cfg)
-    cam.start()
-
-    # ── autofocus only if supported ─────────────────────────────────────────
-    if "AfMode" in cam.camera_controls:
-        log.info("Autofocus supported – running one-shot AF")
-        cam.set_controls({"AfMode": 2})        # one-shot AF
-        time.sleep(0.5)
-    else:
-        log.info("No autofocus control – skipping AF step")
-
-    # ── auto-expose then lock shutter to 1/200 s ────────────────────────────
-    cam.set_controls({"AeEnable": 1})
-    time.sleep(0.5)
-    cam.set_controls({"AeEnable": 0})
-    cam.set_controls({"FrameDurationLimits": (5000, 5000)})  # 5 ms
-
-    return cam, preview_cfg, still_cfg
-
-def capture_still(cam: Picamera2, still_cfg, preview_cfg):
-    cam.switch_mode(still_cfg)
-    time.sleep(0.1)                # sensor settle
-    img = cam.capture_array()
-    cam.switch_mode(preview_cfg)
-    return img
-
-# ─────────────── worker & heartbeat threads ──────────────────────────────────
-stop_ev = threading.Event()
-
-def uploader(q: queue.Queue):
-    headers = {"Authorization": f"Bearer {BEARER_TOKEN}",
-               "Content-Type": "application/json"}
-    while not stop_ev.is_set() or not q.empty():
-        try:
-            fid, b64_img = q.get(timeout=0.5)
-        except queue.Empty:
-            continue
-        payload = {"id": fid, "img_b64": b64_img}
-        delay = 2
-        for attempt in range(5):
-            try:
-                r = requests.post(WEBHOOK_URL, headers=headers,
-                                  json=payload, timeout=10)
-                if r.ok:
-                    log.info(f"[{fid}] sent still ({len(b64_img)//1024} kB)")
-                    break
-                raise RuntimeError(f"HTTP {r.status_code}")
-            except Exception as e:
-                log.warning(f"[{fid}] retry {attempt+1}: {e}")
-                time.sleep(delay)
-                delay *= 2
-        else:
-            log.error(f"[{fid}] dropped after 5 retries")
-        q.task_done()
-
-def heartbeat(q: queue.Queue, tracks: Dict[int, Track]):
-    while not stop_ev.is_set():
-        time.sleep(HEARTBEAT_SEC)
-        log.debug(f"♥ heartbeat – queue={q.qsize()}  tracks={len(tracks)}")
-
-# ─────────────────────────── main loop ───────────────────────────────────────
-def track_and_send():
-    cascade = cv2.CascadeClassifier(CASCADE_PATH)
-    if cascade.empty():
-        raise FileNotFoundError(CASCADE_PATH)
-
-    cam, prev_cfg, still_cfg = init_camera()
-    frame_no = 0
-    history: Deque = deque(maxlen=4)       # unused but keeps flow consistent
-    tracks: Dict[int, Track] = {}
-    next_id = 0
-
-    q = queue.Queue(MAX_QUEUE)
-    threading.Thread(target=uploader,  args=(q,), daemon=True).start()
-    threading.Thread(target=heartbeat, args=(q, tracks), daemon=True).start()
-
+def send(face_id: int, img):
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        print(f"[{face_id}] JPEG encoding failed")
+        return
+    b64 = base64.b64encode(buf).decode()
     try:
-        while not stop_ev.is_set():
-            frame = cam.capture_array()          # 640×480 preview
-            frame_no += 1
-            history.append(frame)
+        headers = {
+            "Authorization": f"Bearer {BEARER_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        requests.post(WEBHOOK_URL, headers=headers, json={"id": face_id, "img_b64": b64}, timeout=10)
+        print(f"[{face_id}] sent")
+    except Exception as e:
+        print(f"[{face_id}] send failed – {e}")
 
-            if frame_no % DETECT_EVERY:
-                continue
+class FaceTracker:
+    def __init__(self, max_miss=15):
+        self.next_id = 0
+        self.tracks  = {}
+        self.max_miss = max_miss
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = cascade.detectMultiScale(gray, 1.2, 3, 0, (30, 30))
+    @staticmethod
+    def _center(b):
+        return (b[0] + b[2] // 2, b[1] + b[3] // 2)
 
-            # age tracks
-            for tr in tracks.values():
-                tr.miss += 1
+    def update(self, detections):
+        now = time.time()
+        for t in self.tracks.values():
+            t["miss"] += 1
 
-            # assign detections
-            for (x, y, w, h) in faces:
-                box = (x, y, w, h)
-                best_i, best_id = 0.0, None
-                for tid, tr in tracks.items():
-                    i = iou(box, tr.bbox)
-                    if i > best_i:
-                        best_i, best_id = i, tid
-                if best_i > 0.3:
-                    tr = tracks[best_id]
-                    tr.bbox, tr.miss, tr.last_seen = box, 0, time.time()
-                    log.info(f"DETECT ▶ existing ID {best_id}")
-                else:
-                    tracks[next_id] = Track(box, time.time(), id=next_id)
-                    log.info(f"DETECT ◎ new ID {next_id}")
-                    next_id += 1
+        for det in detections:
+            cx, cy = self._center(det)
+            best_id, best_d = None, 1e9
+            for fid, t in self.tracks.items():
+                tx, ty = self._center(t["bbox"])
+                d = (cx - tx) ** 2 + (cy - ty) ** 2
+                if d < best_d and d < 30 ** 2:
+                    best_id, best_d = fid, d
+            if best_id is None:
+                fid = self.next_id
+                self.next_id += 1
+                self.tracks[fid] = dict(bbox=det, last_seen=now, last_sent=0, miss=0)
+            else:
+                t = self.tracks[best_id]
+                t.update(bbox=det, last_seen=now, miss=0)
 
-            # drop stale
-            for tid in [tid for tid, tr in tracks.items() if tr.miss > MAX_MISS]:
-                tracks.pop(tid, None)
+        gone = [fid for fid, t in self.tracks.items() if t["miss"] > self.max_miss]
+        for fid in gone:
+            del self.tracks[fid]
 
-            # enqueue still if due
-            now = time.time()
-            for tr in tracks.values():
-                if now - tr.last_sent < SEND_EVERY or q.full():
-                    continue
-                hi_res = capture_still(cam, still_cfg, prev_cfg)
-                q.put((tr.id, encode_b64(hi_res)))
-                log.info(f"SEND ↥ queued ID {tr.id}")
-                tr.last_sent = now
+        return self.tracks
 
-    finally:
-        log.info("Shutting down…")
-        stop_ev.set()
-        q.join()
-        cam.stop()
+# Camera setup
+cascade = cv2.CascadeClassifier(CASCADE_PATH)
+if cascade.empty():
+    raise IOError("Haar cascade XML not found!")
 
-# ───────────────────────── entry-point ────────────────────────────────────────
-def _sig_handler(sig, frame):
-    log.info(f"Signal {sig} received – shutdown initiated")
-    stop_ev.set()
+cam = Picamera2()
 
-signal.signal(signal.SIGINT,  _sig_handler)
-signal.signal(signal.SIGTERM, _sig_handler)
+# Preview for detection
+preview_config = cam.create_preview_configuration(
+    main={"format": "XRGB8888", "size": (320, 240)})
 
-if __name__ == "__main__":
-    track_and_send()
+# Still capture configuration
+still_config = cam.create_still_configuration(
+    main={"format": "XRGB8888", "size": (STILL_WIDTH, STILL_HEIGHT)})
+
+cam.configure(preview_config)
+cam.start()
+time.sleep(0.5)
+
+tracker = FaceTracker(max_miss=MAX_MISS)
+frame_counter = 0
+
+while True:
+    frame = cam.capture_array()
+    frame_counter += 1
+
+    if frame_counter % DETECT_EVERY == 0:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        tracks = tracker.update(faces)
+
+        for fid, t in tracks.items():
+            x, y, w, h = t["bbox"]
+
+            if time.time() - t["last_sent"] >= SEND_EVERY:
+                # Switch to still mode and capture high-res image
+                cam.switch_mode_and_capture_file(still_config, "/tmp/highres.jpg")
+                high_res_frame = cv2.imread("/tmp/highres.jpg")
+
+                preview_width = 320
+                highres_width = high_res_frame.shape[1]
+                scale_factor = highres_width / preview_width
+
+                hx = int(x * scale_factor)
+                hy = int(y * scale_factor)
+                hw = int(w * scale_factor)
+                hh = int(h * scale_factor)
+
+                hx = max(0, hx)
+                hy = max(0, hy)
+                hw = min(hw, high_res_frame.shape[1] - hx)
+                hh = min(hh, high_res_frame.shape[0] - hy)
+
+                crop = high_res_frame[hy:hy + hh, hx:hx + hw]
+
+                if max(hw, hh) > MAX_CROP_SIZE:
+                    crop = cv2.resize(crop, (MAX_CROP_SIZE, MAX_CROP_SIZE))
+
+                send(fid, crop)
+                t["last_sent"] = time.time()
+
+                cam.configure(preview_config)
+                cam.start()
+                time.sleep(0.2)
+
+    if frame_counter % 10 == 0:
+        for fid, t in tracker.tracks.items():
+            x, y, w, h = t["bbox"]
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(frame, f"ID {fid}", (x, y - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+        cv2.imshow("Face-Tracker", frame)
+
+    if cv2.waitKey(1) == 27:
+        break
+
+cv2.destroyAllWindows()
