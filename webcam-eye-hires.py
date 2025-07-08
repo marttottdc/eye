@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 import cv2, time, base64, requests, os, sys
 from dotenv import load_dotenv
-from picamera2 import Picamera2
 
 load_dotenv()
 
-# ---------- CONFIG ----------------------------------------------------------
 CASCADE_PATH   = "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
-STILL_WIDTH    = int(os.getenv("STILL_WIDTH", 1024))
-STILL_HEIGHT   = int(os.getenv("STILL_HEIGHT", 768))
+PREVIEW_SIZE   = (320, 240)
+STILL_SIZE     = (int(os.getenv("STILL_WIDTH", 1024)),
+                  int(os.getenv("STILL_HEIGHT", 768)))
 
 SEND_EVERY     = int(os.getenv("SEND_EVERY", 20))
 MAX_MISS       = int(os.getenv("MAX_MISS", 15))
@@ -20,7 +19,7 @@ BEARER_TOKEN   = os.getenv("WEBHOOK_TOKEN")
 if not (WEBHOOK_URL and BEARER_TOKEN):
     sys.exit("WEBHOOK_URL / WEBHOOK_TOKEN missing in environment")
 
-# ---------- HELPERS ---------------------------------------------------------
+
 def send(face_id: int, img):
     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
@@ -45,7 +44,6 @@ class FaceTracker:
         self.max_miss = max_miss
     @staticmethod
     def _center(b): return (b[0]+b[2]//2, b[1]+b[3]//2)
-
     def update(self, detections):
         for t in self.tracks.values(): t["miss"] += 1
         for det in detections:
@@ -67,19 +65,21 @@ class FaceTracker:
 cascade=cv2.CascadeClassifier(CASCADE_PATH)
 if cascade.empty(): sys.exit("Cascade not found")
 
-cam=Picamera2()
-preview_cfg=cam.create_preview_configuration(main={"format":"XRGB8888","size":(320,240)})
-still_cfg  =cam.create_still_configuration(main={"format":"XRGB8888","size":(STILL_WIDTH,STILL_HEIGHT)})
+cam = cv2.VideoCapture(0)                         # your USB cam
+if not cam.isOpened():
+    sys.exit("Cannot open camera")
 
-cam.configure(preview_cfg)
-cam.start(); time.sleep(0.3)
+# set preview resolution once
+cam.set(cv2.CAP_PROP_FRAME_WIDTH,  PREVIEW_SIZE[0])
+cam.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_SIZE[1])
 
 tracker, frame_ctr = FaceTracker(MAX_MISS), 0
 
-# ---------- MAIN LOOP -------------------------------------------------------
 try:
     while True:
-        frame = cam.capture_array(); frame_ctr += 1
+        ok, frame = cam.read(); frame_ctr += 1
+        if not ok:
+            print("Frame grab failed"); time.sleep(0.1); continue
 
         if frame_ctr % DETECT_EVERY == 0:
             faces = cascade.detectMultiScale(
@@ -90,16 +90,19 @@ try:
             for fid,t in tracks.items():
                 if time.time()-t["last_sent"] < SEND_EVERY: continue
 
-                # capture full-res still
-                cam.stop()
-                cam.configure(still_cfg); cam.start(); time.sleep(0.25)
-                hi_frame = cam.capture_array()
+                # temporarily bump resolution for a hi-res still
+                cam.set(cv2.CAP_PROP_FRAME_WIDTH,  STILL_SIZE[0])
+                cam.set(cv2.CAP_PROP_FRAME_HEIGHT, STILL_SIZE[1])
+                time.sleep(0.25)                       # let exposure settle
+                ok, hi_frame = cam.read()
 
-                cam.stop()
-                cam.configure(preview_cfg); cam.start(); time.sleep(0.25)
+                # restore preview resolution
+                cam.set(cv2.CAP_PROP_FRAME_WIDTH,  PREVIEW_SIZE[0])
+                cam.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_SIZE[1])
 
-                send(fid, hi_frame)
-                t["last_sent"] = time.time()
+                if ok:
+                    send(fid, hi_frame)
+                    t["last_sent"] = time.time()
 
         if VISUALIZER and frame_ctr % 10 == 0:
             for fid,t in tracker.tracks.items():
@@ -115,5 +118,5 @@ try:
             time.sleep(0.01)
 
 finally:
-    cam.stop()
+    cam.release()
     if VISUALIZER: cv2.destroyAllWindows()
